@@ -563,11 +563,17 @@ class BAREMETALUPI(BAREMETALBASE):
                         apps_record_ip_list.append(self.srv_details[machine]["ip"])
                         worker_count += 1
 
-            logger.info("Configuring DNS records")
             zone_id = self.aws.create_hosted_zone(cluster_name=cluster_name)
 
             if config.ENV_DATA["worker_replicas"] == 0:
                 apps_record_ip_list = api_record_ip_list
+            logger.info(
+                "Configuring Route53 DNS for cluster %s "
+                "(api/api-int A -> %s, *.apps A -> %s, NS delegation)",
+                cluster_name,
+                api_record_ip_list,
+                apps_record_ip_list,
+            )
             for ip in api_record_ip_list:
                 response_list.append(
                     self.aws.update_hosted_zone_record(
@@ -618,9 +624,16 @@ class BAREMETALUPI(BAREMETALBASE):
                     raw_data=True,
                 )
             )
-            logger.info("Waiting for Record Response")
+            logger.info(
+                "Waiting for Route53 to confirm DNS records for cluster %s",
+                cluster_name,
+            )
             self.aws.wait_for_record_set(response_list=response_list)
-            logger.info("Records Created Successfully")
+            logger.info(
+                "Route53 DNS records ready for cluster %s "
+                "(api/api-int, *.apps, NS delegation)",
+                cluster_name,
+            )
             logger.info("waiting for bootstrap to complete")
             try:
                 run_cmd(
@@ -1332,10 +1345,19 @@ class BAREMETALAI(BAREMETALBASE):
             """
             response_list = []
             zone_id = self.aws.get_hosted_zone_id_for_domain()
+            api_fqdn = f"api.{self.cluster_name}"
+            apps_fqdn = f"*.apps.{self.cluster_name}"
+            logger.info(
+                "Creating Route53 DNS A records: %s -> %s, %s -> %s",
+                api_fqdn,
+                self.api_vip,
+                apps_fqdn,
+                self.ingress_vip,
+            )
             response_list.append(
                 self.aws.update_hosted_zone_record(
                     zone_id=zone_id,
-                    record_name=f"api.{self.cluster_name}",
+                    record_name=api_fqdn,
                     data=self.api_vip,
                     type="A",
                     operation_type="Add",
@@ -1344,15 +1366,25 @@ class BAREMETALAI(BAREMETALBASE):
             response_list.append(
                 self.aws.update_hosted_zone_record(
                     zone_id=zone_id,
-                    record_name=f"*.apps.{self.cluster_name}",
+                    record_name=apps_fqdn,
                     data=self.ingress_vip,
                     type="A",
                     operation_type="Add",
                 )
             )
-            logger.info("Waiting for Record Response")
+            logger.info(
+                "Waiting for Route53 to confirm DNS records for %s and %s",
+                api_fqdn,
+                apps_fqdn,
+            )
             self.aws.wait_for_record_set(response_list=response_list)
-            logger.info("Records Created Successfully")
+            logger.info(
+                "Route53 DNS records ready: %s -> %s, %s -> %s",
+                api_fqdn,
+                self.api_vip,
+                apps_fqdn,
+                self.ingress_vip,
+            )
 
         def configure_ipxe_on_helper(self):
             """
