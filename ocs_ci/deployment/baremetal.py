@@ -916,7 +916,6 @@ class BAREMETALAI(BAREMETALBASE):
             )
             redfish_util.eject_iso_nodes(
                 redfish_servers,
-                max_workers=self._redfish_max_workers(),
                 restart=restart,
             )
 
@@ -1091,17 +1090,38 @@ class BAREMETALAI(BAREMETALBASE):
             try:
                 self.ai_cluster.wait_for_discovered_nodes(expected_node_num)
             except TimeoutExpiredError:
-                discovered_hosts = [
-                    host["requested_hostname"]
-                    for host in self.ai_cluster.get_infra_env_hosts()
-                ]
-                missing = [m for m in target_nodes if m not in discovered_hosts]
-                logger.warning(
-                    "Discovery timeout; retrying boot for missing nodes: %s", missing
-                )
                 if self._boot_method() == "iso":
+                    # Use MACs to identify missing nodes (requested_hostname not set yet)
+                    provisioning_network = self.bm_config["bm_provisioning_network"]
+                    discovered_macs = self.ai_cluster.get_discovered_macs()
+                    missing = [
+                        machine
+                        for machine in target_nodes
+                        if self.srv_details[machine][
+                            f"{provisioning_network}_mac"
+                        ].lower()
+                        not in discovered_macs
+                    ]
+                    logger.warning(
+                        "Discovery timeout; retrying boot for missing nodes: %s "
+                        "(already discovered MACs: %s)",
+                        missing,
+                        sorted(discovered_macs),
+                    )
+                    if not missing:
+                        raise
                     self._boot_nodes_with_discovery_iso(missing)
                 else:
+                    # Classic path: use requested_hostname (pre-existing logic)
+                    discovered_hosts = [
+                        host["requested_hostname"]
+                        for host in self.ai_cluster.get_infra_env_hosts()
+                    ]
+                    missing = [m for m in target_nodes if m not in discovered_hosts]
+                    logger.warning(
+                        "Discovery timeout; retrying boot for missing nodes: %s",
+                        missing,
+                    )
                     for machine in missing:
                         self.set_pxe_boot_and_reboot(machine)
                 self.ai_cluster.wait_for_discovered_nodes(expected_node_num)
@@ -1112,6 +1132,8 @@ class BAREMETALAI(BAREMETALBASE):
             if self._boot_method() == "iso":
                 # Eject ISO so later reboots hit disk; do not restart here.
                 self._eject_discovery_isos(target_nodes, restart=False)
+                # Verify all expected MACs were discovered
+                self._verify_discovered_macs(mac_name_mapping)
             else:
                 # configure pxelinux.cfg files for each server (named based on MAC address)
                 # to boot from the first disk (without this change, if the servers are configured
@@ -1163,6 +1185,30 @@ class BAREMETALAI(BAREMETALBASE):
                 for worker in workers:
                     clean_disks(worker)
 
+        def _verify_discovered_macs(self, mac_name_mapping):
+            """
+            Fail fast if conf provisioning MAC values are not present on discovered hosts.
+
+            Args:
+                mac_name_mapping (dict): lowercase MAC -> hostname mapping from conf
+            """
+            expected = {mac.lower() for mac in mac_name_mapping}
+            seen = self.ai_cluster.get_discovered_macs()
+            missing = expected - seen
+            unexpected = seen - expected
+            logger.info(
+                "MAC audit: expected=%s seen=%s missing=%s",
+                sorted(expected),
+                sorted(seen),
+                sorted(missing),
+            )
+            logger.debug("MAC audit unexpected=%s", sorted(unexpected))
+            if missing:
+                raise exceptions.HostValidationFailed(
+                    "Discovered hosts are missing expected MAC(s) from conf "
+                    f"(bm_provisioning_network mapping): {sorted(missing)}"
+                )
+
         def _boot_nodes_with_discovery_iso(self, machines):
             """
             Attach Assisted Installer discovery ISO via Redfish and boot nodes once from CD.
@@ -1175,12 +1221,18 @@ class BAREMETALAI(BAREMETALBASE):
             if not self.discovery_iso_url:
                 self.discovery_iso_url = self.ai_cluster.get_discovery_iso_url()
             logger.info(
-                "Booting %s node(s) from discovery ISO via Redfish", len(machines)
+                "Booting %s node(s) from discovery ISO via Redfish: %s",
+                len(machines),
+                machines,
             )
             redfish_util.attach_iso_and_boot_nodes(
                 self._servers_subset(machines),
                 self.discovery_iso_url,
-                max_workers=self._redfish_max_workers(),
+            )
+            logger.info(
+                "BMC discovery boot done for %s node(s); waiting for hosts in "
+                "Assisted Installer (UI: Host inventory)",
+                len(machines),
             )
 
         def _boot_nodes_with_ipxe(self, machines):

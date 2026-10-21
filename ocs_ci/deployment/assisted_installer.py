@@ -599,6 +599,18 @@ class AssistedInstallerCluster(object):
                 # them is used to the name and role mapping
                 pass
 
+    def get_discovered_macs(self):
+        """
+        Collect all MAC addresses reported by discovered infra-env hosts.
+
+        Returns:
+            set: lowercase MAC addresses seen in host inventories
+        """
+        macs = set()
+        for host in self.api.get_infra_env_hosts(self.infra_id):
+            macs.update(_host_inventory_macs(host))
+        return macs
+
     def install_cluster(self, pending_user_action_handler=None):
         """
         Trigger cluster installation
