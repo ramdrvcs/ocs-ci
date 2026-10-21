@@ -6,33 +6,13 @@ on:
     - cron: '0 20 * * *'
 
 jobs:
-  stale:
-
+  sync_fork:
     runs-on: ubuntu-latest
-    permissions:
-      issues: write
-      pull-requests: write
-
     steps:
-    - uses: actions/stale@v4
-      with:
-        repo-token: ${{ secrets.GITHUB_TOKEN }}
-        days-before-stale: 90
-        days-before-close: 30
-        stale-issue-message: >
-          This issue has been automatically marked as stale because it has not had
-          recent activity. It will be closed in 30 days if no further activity occurs.
-        stale-pr-message: >
-          This pull request has been automatically marked as stale because it has not had
-          recent activity. It will be closed in 30 days if no further activity occurs.
-        close-issue-message: >
-          This issue has been automatically closed due to inactivity.
-          Please re-open if this still requires investigation.
-        close-pr-message: >
-          This pull request has been automatically closed due to inactivity.
-          Please re-open if these changes are still required.
-        stale-issue-label: 'lifecycle/stale'
-        stale-pr-label: 'lifecycle/stale'
-        exempt-issue-labels: 'lifecycle/keepalive'
-        exempt-pr-labels: 'lifecycle/keepalive'
-        operations-per-run: 100
+      - name: Sync Fork via GitHub CLI
+        env:
+          # You need to generate a Classic PAT with 'repo' scope 
+          # and save it in this private repo's Secrets as MY_SYNC_TOKEN
+          GH_TOKEN: ${{ secrets.MY_SYNC_TOKEN }} 
+        run: |
+          gh repo sync ramdrvcs/ocs-ci --branch master
