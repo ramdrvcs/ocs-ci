@@ -25,7 +25,6 @@ from ocs_ci.ocs.exceptions import CommandFailed, RhcosImageNotFound, TimeoutExpi
 from ocs_ci.ocs.node import get_nodes
 from ocs_ci.ocs.openshift_ops import OCP
 from ocs_ci.utility import ibmcloud_bm
-from ocs_ci.utility import redfish as redfish_util
 from ocs_ci.utility.baremetal import update_uefi_boot_order
 from ocs_ci.utility.bootstrap import gather_bootstrap
 from ocs_ci.utility.connection import Connection
@@ -950,6 +949,20 @@ class BAREMETALAI(BAREMETALBASE):
         def _redfish_max_workers(self):
             return self.bm_config.get("redfish_max_workers", 5)
 
+        def _redfish_util(self):
+            """
+            Lazy-import Redfish helpers so importing baremetal (e.g. disk
+            cleanup helpers) does not require the optional ``redfish`` package.
+            """
+            try:
+                from ocs_ci.utility import redfish as redfish_util
+            except ModuleNotFoundError as err:
+                raise ModuleNotFoundError(
+                    "Redfish ISO boot requires the 'redfish' package "
+                    "(pyproject: redfish==3.4.0). Install project dependencies."
+                ) from err
+            return redfish_util
+
         def _eject_discovery_isos(self, machines, restart=False):
             """Eject discovery ISOs from Redfish VirtualMedia on given machines."""
             redfish_servers = {
@@ -964,7 +977,7 @@ class BAREMETALAI(BAREMETALBASE):
                 len(redfish_servers),
                 restart,
             )
-            redfish_util.eject_iso_nodes(
+            self._redfish_util().eject_iso_nodes(
                 redfish_servers,
                 restart=restart,
             )
@@ -1415,7 +1428,7 @@ class BAREMETALAI(BAREMETALBASE):
                 len(machines),
                 machines,
             )
-            redfish_util.attach_iso_and_boot_nodes(
+            self._redfish_util().attach_iso_and_boot_nodes(
                 self._servers_subset(machines),
                 self.discovery_iso_url,
             )
@@ -1666,7 +1679,7 @@ class BAREMETALAI(BAREMETALBASE):
                     "(eject discovery ISO and restart)",
                     machine,
                 )
-                redfish_util.eject_iso_and_restart(
+                self._redfish_util().eject_iso_and_restart(
                     details["mgmt_console"],
                     details["mgmt_username"],
                     details["mgmt_password"],
@@ -1868,7 +1881,7 @@ class BAREMETALAI(BAREMETALBASE):
                         "discovery_iso_url is not set; cannot retry Redfish ISO boot"
                     )
                 details = self._servers_subset([machine])[machine]
-                redfish_util.attach_iso_and_boot(
+                self._redfish_util().attach_iso_and_boot(
                     details["mgmt_console"],
                     details["mgmt_username"],
                     details["mgmt_password"],
