@@ -1,18 +1,20 @@
+import base64
 import json
-import os
-import pytest
 import logging
+import os
 import re
+import shlex
+import socket
 import tempfile
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from time import sleep
 
-import yaml
+import pytest
 import requests
+import yaml
 from semantic_version import Version
-import socket
 
 from .flexy import FlexyBaremetalPSI
 from ocs_ci.utility import psiutils, aws, version
@@ -2151,45 +2153,118 @@ def disks_available_to_cleanup(worker, namespace=constants.DEFAULT_NAMESPACE):
     return disks_names_available_for_cleanup
 
 
+CLEAN_DISK_SCRIPT_NAME = "clean_disk_for_odf_reuse.sh"
+CLEAN_DISK_SCRIPT_DEST = f"/tmp/{CLEAN_DISK_SCRIPT_NAME}"
+
+
+def _disks_from_cleanup_output(script_output):
+    """
+    Parse device paths from clean_disk_for_odf_reuse.sh stdout.
+
+    Prefers ``STEP: done <device>`` lines; falls back to ``STEP: cleaning``.
+    """
+    done_disks = []
+    cleaning_disks = []
+    for line in str(script_output).splitlines():
+        line = line.strip()
+        if line.startswith("STEP: done "):
+            done_disks.append(line[len("STEP: done ") :].strip())
+        elif line.startswith("STEP: cleaning "):
+            cleaning_disks.append(line[len("STEP: cleaning ") :].strip())
+    return done_disks or cleaning_disks
+
+
+def _run_clean_disk_script(node_name, script_args, namespace, timeout=900):
+    """
+    Upload clean_disk_for_odf_reuse.sh and execute it in one oc debug session.
+
+    INFO: short success summary. DEBUG: full script output.
+    On failure: ERROR with full script output (``|| true`` keeps stdout available).
+
+    Raises:
+        CommandFailed: if the wipe script did not finish with ``DONE: cleaned``
+    """
+    script_src_path = os.path.join(
+        constants.TOP_DIR, "scripts", "bash", CLEAN_DISK_SCRIPT_NAME
+    )
+    if not os.path.exists(script_src_path):
+        raise FileNotFoundError(f"Script not found at {script_src_path}")
+
+    with open(script_src_path, "rb") as script_file:
+        script_b64 = base64.b64encode(script_file.read()).decode("utf-8").replace(
+            "\n", ""
+        )
+
+    quoted_dest = shlex.quote(CLEAN_DISK_SCRIPT_DEST)
+    run_argv = shlex.join(["bash", CLEAN_DISK_SCRIPT_DEST, *script_args])
+    # ``|| true`` so oc debug still returns STEP stdout when the script fails.
+    cmd = (
+        f'echo "{script_b64}" | base64 -d > {quoted_dest} && '
+        f"chmod 755 {quoted_dest} && "
+        f"({run_argv}) || true"
+    )
+    logger.debug(
+        "Disk cleanup on %s via %s args=%s",
+        node_name,
+        CLEAN_DISK_SCRIPT_NAME,
+        script_args,
+    )
+    out = str(
+        ocp.OCP().exec_oc_debug_cmd(
+            node=node_name,
+            cmd_list=[cmd],
+            namespace=namespace,
+            timeout=timeout,
+            secrets=[script_b64],
+            use_root=True,
+        )
+    )
+
+    if "DONE: cleaned" not in out:
+        logger.error(
+            "Disk cleanup failed on %s. Script output:\n%s", node_name, out
+        )
+        raise CommandFailed(f"Disk cleanup failed on {node_name}")
+
+    logger.debug("Disk cleanup output on %s:\n%s", node_name, out)
+    disks = _disks_from_cleanup_output(out)
+    disks_txt = " ".join(disks) if disks else "unknown devices"
+    logger.info(
+        "Disk cleanup done on %s: wipefs, sgdisk, bluestore wipe on %s",
+        node_name,
+        disks_txt,
+    )
+    return out
+
+
 @retry(exceptions.CommandFailed, tries=10, delay=30, backoff=1)
 def clean_disks(worker, namespace=constants.DEFAULT_NAMESPACE):
     """
-    Perform disks cleanup
+    Perform disks cleanup on a worker via scripts/bash/clean_disk_for_odf_reuse.sh.
+
+    One oc debug session: upload script, auto-discover non-boot disks, wipefs,
+    sgdisk --zap-all when available, and BlueStore label zeroing (incl. offset 0).
 
     Args:
         worker (object): worker node object
         namespace (str): namespace where the oc_debug command will be executed
 
     """
-    ocp_obj = ocp.OCP()
-    disks_available_on_worker_nodes_for_cleanup = disks_available_to_cleanup(
-        worker, namespace
-    )
-
-    # Clean each eligible disk directly using the validated list from
-    # disks_available_to_cleanup. Avoids a global lsblk scan with major-number
-    # exclusions (e.g. -e252) that inadvertently skips virtio-blk devices on
-    # KVM/Fyre platforms where major 252 is assigned to virtio-blk instead of
-    # device-mapper.
-    for disk_name in disks_available_on_worker_nodes_for_cleanup:
-        out = ocp_obj.exec_oc_debug_cmd(
-            node=worker.name,
-            cmd_list=[f"lsblk -n --output SIZE -b --json /dev/{disk_name}"],
-            namespace=namespace,
-        )
-        size = int(json.loads(str(out))["blockdevices"][0]["size"])
-        clean_disk(
-            worker.name,
-            f"/dev/{disk_name}",
-            size,
-            ocp_obj=ocp_obj,
-            namespace=namespace,
-        )
-
+    # --auto discovers disks on-node (same boot/rom/nbd rules as
+    # disks_available_to_cleanup). Avoids a separate discover debug pod and
+    # avoids major-number exclusions that skip virtio-blk on KVM/Fyre.
+    script_args = ["--auto"]
     if config.DEPLOYMENT.get("partitioned_disk_on_workers", False):
         root_disk_common_path = config.ENV_DATA["baremetal"]["root_disk_common_path"]
         partition = f"{root_disk_common_path}-part5"
-        clean_disk(worker.name, partition, run_sgdisk=False, ocp_obj=ocp_obj)
+        logger.debug(
+            "Also cleaning partition %s on %s without GPT wipe",
+            partition,
+            worker.name,
+        )
+        script_args.extend(["--no-gpt", partition])
+
+    _run_clean_disk_script(worker.name, script_args, namespace)
 
 
 def clean_disk(
@@ -2201,82 +2276,29 @@ def clean_disk(
     namespace=constants.DEFAULT_NAMESPACE,
 ):
     """
-    Perform disks cleanup
+    Perform disks cleanup for a single device via clean_disk_for_odf_reuse.sh.
 
     Args:
         node_name (str): name of the (worker) node where to run the disk cleanup
         device (str): path to the device to be cleaned up
-        size (int): size of the device, if not provided, it will be obtained via `lsblk -n --output SIZE -b {device}`
-            command
-        run_sgdisk (bool): run `sgdisk --zap-all {device}` command (default:
-            True). Skipped automatically when `sgdisk` is not present on the
-            node (e.g. OCP 5.0+ RHCOS images).
-        ocp_obj (obj): OCP object, if not provided, new one is initialized
+        size (int): unused; size is read on the node via lsblk. Kept for
+            backward-compatible callers.
+        run_sgdisk (bool): if True, run sgdisk --zap-all when present on the
+            host; if missing, skip zap (same as prior ocs-ci). If False, skip
+            GPT wipe entirely (wipefs + BlueStore offsets only).
+        ocp_obj (obj): unused; kept for backward-compatible callers
         namespace (str): namespace where the oc_debug command will be executed
 
     """
-    if not ocp_obj:
-        ocp_obj = ocp.OCP()
-    logger.info(f"Cleaning up {device}")
-    out = ocp_obj.exec_oc_debug_cmd(
-        node=node_name,
-        cmd_list=[f"wipefs -a -f {device}"],
-        namespace=namespace,
-    )
-
-    logger.info(out)
-    if run_sgdisk:
-        sgdisk_check = ocp_obj.exec_oc_debug_cmd(
-            node=node_name,
-            cmd_list=["command -v sgdisk || echo SGDISK_MISSING"],
-            namespace=namespace,
+    if size is not None:
+        logger.debug(
+            "clean_disk size=%s ignored; size is obtained on-node via lsblk", size
         )
-        if "SGDISK_MISSING" in str(sgdisk_check):
-            logger.warning(
-                "sgdisk not found on node %s; skipping sgdisk --zap-all "
-                "for %s (wipefs and bluestore dd cleanup still run)",
-                node_name,
-                device,
-            )
-        else:
-            out = ocp_obj.exec_oc_debug_cmd(
-                node=node_name,
-                cmd_list=[f"sgdisk --zap-all {device}"],
-                namespace=namespace,
-            )
-            logger.info(out)
-    else:
-        logger.info("Skipping sgdisk --zap-all for %s (run_sgdisk=False)", device)
-
-    # Write different portion because bluestore replicates its metadata at multiple places on the device
-    # (at 0 / 1Gb / 10Gb / 100Gb / 1000Gb etc.)
-
-    # Get the size of disk in bytes
-    if not size:
-        size = ocp_obj.exec_oc_debug_cmd(
-            node=node_name,
-            cmd_list=[f"lsblk -n  --output SIZE -b {device}"],
-            namespace=namespace,
-        )
-    disk_size_bytes = int(size)
-
-    # Start offset as 1GiB
-    dd_seek_bytes = 1073741824
-    dd_seek_offsets = []
-
-    # Get byte values in 1Gb / 10Gb / 100Gb etc. Applicable when 'bs' in dd command is 1
-    while dd_seek_bytes < disk_size_bytes:
-        dd_seek_offsets.append(dd_seek_bytes)
-        dd_seek_bytes = dd_seek_bytes * 10
-
-    for dd_seek in dd_seek_offsets:
-        dd_cmd = [f"dd if=/dev/zero of='{device}' bs=1 count=204800 seek={dd_seek}"]
-        out = ocp_obj.exec_oc_debug_cmd(
-            node=node_name,
-            cmd_list=dd_cmd,
-            namespace=namespace,
-        )
-        logger.info(out)
+    if ocp_obj is not None:
+        logger.debug("clean_disk ocp_obj ignored; oc debug is used directly")
+    logger.info("Cleaning up %s on %s", device, node_name)
+    script_args = [device] if run_sgdisk else ["--no-gpt", device]
+    _run_clean_disk_script(node_name, script_args, namespace)
 
 
 def detect_simulation_disk_on_node(wnode, namespace=None):
