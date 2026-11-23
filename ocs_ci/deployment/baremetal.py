@@ -2217,6 +2217,8 @@ def _run_clean_disk_script(node_name, script_args, namespace, timeout=900):
             timeout=timeout,
             secrets=[script_b64],
             use_root=True,
+            # oc debug prints Starting/Removing pod lines on stderr; not real errors
+            silent=True,
         )
     )
 

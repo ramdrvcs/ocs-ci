@@ -250,6 +250,7 @@ class OCP(object):
         namespace="default",
         use_root=True,
         secrets=None,
+        silent=False,
     ):
         """
         Function to execute "oc debug" command on OCP node
@@ -263,6 +264,8 @@ class OCP(object):
                 namespace cannot be used from 4.19 because we are hitting: violates PodSecurity
             use_root (bool): Whether to use root user or not for running the command.
             secrets (list): A list of secrets to be masked with asterisks in logs.
+            silent (bool): If True, suppress Command stderr WARNING (oc debug
+                always prints Starting/Removing pod chatter on stderr).
 
         Returns:
             out (str): Returns output of the executed command/commands
@@ -289,6 +292,7 @@ class OCP(object):
                 out_yaml_format=False,
                 timeout=timeout,
                 secrets=secrets,
+                silent=silent,
             )
         )
         if err_msg in out:
