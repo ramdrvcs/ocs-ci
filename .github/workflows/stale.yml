@@ -17,3 +17,8 @@ jobs:
           GH_TOKEN: ${{ secrets.MY_SYNC_TOKEN }} 
         run: |
           gh repo sync ramdrvcs/ocs-ci --branch master
+          gh repo sync ramdrvcs/ocs-ci --branch release-4.22
+          gh repo sync ramdrvcs/ocs-ci --branch release-4.21
+          gh repo sync ramdrvcs/ocs-ci --branch release-4.20
+          gh repo sync ramdrvcs/ocs-ci --branch release-4.19
+          gh repo sync ramdrvcs/ocs-ci --branch release-4.18
