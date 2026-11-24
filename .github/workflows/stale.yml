@@ -22,3 +22,4 @@ jobs:
           gh repo sync ramdrvcs/ocs-ci --branch release-4.20
           gh repo sync ramdrvcs/ocs-ci --branch release-4.19
           gh repo sync ramdrvcs/ocs-ci --branch release-4.18
+          gh repo sync ramdrvcs/ocs-ci --branch stable
