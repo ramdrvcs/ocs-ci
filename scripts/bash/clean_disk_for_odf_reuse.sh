@@ -2,9 +2,11 @@
 # Wipe block devices so they are safe for ODF / LSO reuse on bare metal.
 #
 # Clears filesystem signatures, GPT via sgdisk when available, and Ceph
-# BlueStore labels at offset 0 and 1GiB/10GiB/100GiB/1000GiB/...
-# Docs: https://docs.ceph.com/en/latest/man/8/ceph-bluestore-tool/
-# IBM ODF disk wipe: sgdisk --zap-all + dd at those offsets (when sgdisk exists).
+# BlueStore labels at 0 / 1GiB / 10GiB / 100GiB / 1000GiB (when within disk size).
+# Evidence (same wipe for ODF and FDF):
+#   https://www.ibm.com/support/pages/osd-deployment-fails-due-non-empty-or-unclean-storage-drives
+#   https://www.ibm.com/support/pages/how-replace-failed-ceph-osd-and-use-same-backend-disk-osd-creation-odffdf
+# Ceph BlueStore tool: https://docs.ceph.com/en/latest/man/8/ceph-bluestore-tool/
 #
 # Usage:
 #   clean_disk_for_odf_reuse.sh --auto
@@ -83,12 +85,23 @@ clean_one_device() {
     fi
 
     echo "STEP: bluestore wipe ${device} size=${size}"
-    dd if=/dev/zero of="${device}" bs=1M count=1 seek=0 conv=fsync
-
-    local seek=1073741824
-    while [[ "${seek}" -lt "${size}" ]]; do
-        dd if=/dev/zero of="${device}" bs=1M count=1 seek="$((seek / 1048576))" conv=fsync
-        seek=$((seek * 10))
+    # IBM ODF/FDF unclean-drives recipe (evidence):
+    #   https://www.ibm.com/support/pages/osd-deployment-fails-due-non-empty-or-unclean-storage-drives
+    #   for gb in 0 1 10 100 1000; do
+    #     dd if=/dev/zero of=$DISK bs=4K count=200 oflag=direct,dsync \
+    #       seek=$((gb * 1024**2)); done
+    # dd seek is in units of bs. With bs=4K, seek=gb*1024^2 would be gb*4GiB;
+    # use seek=$((gb * 262144)) so we hit the documented 0/1/10/100/1000 GiB
+    # BlueStore label offsets.
+    local gb
+    for gb in 0 1 10 100 1000; do
+        if [[ "$((gb * 1024 * 1024 * 1024))" -ge "${size}" ]]; then
+            echo "STEP: skip bluestore offset ${gb}GiB (past end of ${device})"
+            continue
+        fi
+        echo "STEP: bluestore dd ${device} offset=${gb}GiB"
+        dd if=/dev/zero of="${device}" bs=4K count=200 oflag=direct,dsync \
+            seek=$((gb * 262144))
     done
 
     echo "STEP: done ${device}"
